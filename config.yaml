@@ -1,0 +1,17 @@
+# 株価下落通知ツールの設定ファイル
+# 銘柄を追加・削除するときは stocks の項目を編集してください。
+
+notify:
+  line: true            # LINE通知を有効にするか
+  email: true           # メール通知を有効にするか
+  email_always: false   # true なら LINE 成功時もメールを送る / false ならLINE失敗時のみ
+
+stocks:
+  # 日本株: 証券コード + ".T"(閾値は円)
+  - symbol: "7203.T"        # 必須: yfinance のシンボル
+    name: "トヨタ自動車"     # 任意: 通知文に使う表示名。省略時は symbol を使う
+    threshold: 2500          # 必須: この値以下になったら通知
+  # 米国株: ティッカーそのまま(閾値はドル)
+  - symbol: "AAPL"
+    name: "Apple"
+    threshold: 180
