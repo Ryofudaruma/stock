@@ -734,7 +734,7 @@ class StockAlertApp:
         cfg = self._email_form()
         if cfg is None:
             return
-        password = self.password_var.get().replace(" ", "").strip()
+        password = mailer.normalize_password(self.password_var.get())
         if password:
             if not cfg["from_addr"]:
                 messagebox.showwarning("入力エラー", "送信元メールアドレスを入力してください。", parent=self.root)
@@ -756,7 +756,7 @@ class StockAlertApp:
         cfg = self._email_form()
         if cfg is None:
             return
-        password = self.password_var.get().replace(" ", "").strip() or self.password_getter(cfg["from_addr"])
+        password = mailer.normalize_password(self.password_var.get()) or self.password_getter(cfg["from_addr"])
         missing = mailer.missing_fields(cfg, password)
         if missing:
             messagebox.showwarning("設定が足りません", "次の項目を入力してください:\n・" + "\n・".join(missing),

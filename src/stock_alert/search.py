@@ -1,6 +1,6 @@
 """銘柄検索。
 
-- 日本株: 日本取引所グループ(JPX)が公開している「東証上場銘柄一覧」をダウンロードし、
+- 日本株: 日本取引所グループ(JPX)が公開している「東証上場銘柄一覧」(Excel)をダウンロードし、
   ローカルにキャッシュして会社名・証券コードで検索する。
 - 米国株: Yahoo Finance の検索(yfinance.Search)で会社名・ティッカーを検索する。
 """
@@ -10,18 +10,26 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urljoin
 
 from . import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
-JPX_LIST_URL = (
-    "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+# 一覧ファイルが置かれているページ。ファイルの URL や形式(xls → xlsx)は JPX 側で変わることがあるため、
+# まずこのページからリンクを探し、見つからなければ既知の URL を順に試す。
+JPX_PAGE_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
+JPX_LIST_URLS = (
+    "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx",
+    "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls",
 )
+JPX_LINK_PATTERN = re.compile(r"""href=["']([^"']*data_j\.(?:xlsx|xls))["']""", re.IGNORECASE)
+HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StockAlert"}
 JPX_CACHE_PATH = DATA_DIR / "jpx_list.csv"
 JPX_REFRESH_DAYS = 30
 
@@ -67,14 +75,29 @@ def _normalize_code(value) -> str | None:
     return code or None
 
 
+def _find_column(columns, keyword: str, exclude: tuple[str, ...] = ()) -> str | None:
+    """列名に keyword を含む列を探す(列名の表記ゆれ・前後の空白に対応)。"""
+    for col in columns:
+        name = unicodedata.normalize("NFKC", str(col)).strip()
+        if name == keyword:
+            return col
+    for col in columns:
+        name = unicodedata.normalize("NFKC", str(col)).strip()
+        if keyword in name and not any(x in name for x in exclude):
+            return col
+    return None
+
+
 def parse_jpx_dataframe(df) -> list[SearchResult]:
-    """JPX の銘柄一覧(data_j.xls を読み込んだ DataFrame)から株式だけを取り出す。"""
-    required = {"コード", "銘柄名", "市場・商品区分"}
-    if not required.issubset(df.columns):
+    """JPX の銘柄一覧(data_j.xlsx / data_j.xls を読み込んだ DataFrame)から株式だけを取り出す。"""
+    code_col = _find_column(df.columns, "コード", exclude=("業種", "規模"))
+    name_col = _find_column(df.columns, "銘柄名")
+    market_col = _find_column(df.columns, "市場")
+    if code_col is None or name_col is None or market_col is None:
         raise ValueError(f"銘柄一覧の形式が想定と異なります(列: {list(df.columns)})")
 
     results = []
-    for code, name, market in zip(df["コード"], df["銘柄名"], df["市場・商品区分"]):
+    for code, name, market in zip(df[code_col], df[name_col], df[market_col]):
         code = _normalize_code(code)
         market = str(market or "")
         # ETF・REIT・PRO Market などは除外し、株式のみを対象にする
@@ -117,22 +140,54 @@ def jpx_cache_age_days(path: Path = JPX_CACHE_PATH) -> float | None:
         return None
 
 
-def download_jpx_list(path: Path = JPX_CACHE_PATH) -> list[SearchResult]:
+def find_jpx_file_urls(html: str, base_url: str = JPX_PAGE_URL) -> list[str]:
+    """JPX のページの HTML から銘柄一覧ファイルへのリンクを探す(xlsx を優先)。"""
+    urls = []
+    for href in JPX_LINK_PATTERN.findall(html):
+        url = urljoin(base_url, href)
+        if url not in urls:
+            urls.append(url)
+    return sorted(urls, key=lambda u: not u.lower().endswith(".xlsx"))
+
+
+def _candidate_urls(session) -> list[str]:
+    urls: list[str] = []
+    try:
+        response = session.get(JPX_PAGE_URL, timeout=30, headers=HTTP_HEADERS)
+        response.raise_for_status()
+        response.encoding = response.apparent_encoding or "utf-8"
+        urls = find_jpx_file_urls(response.text, JPX_PAGE_URL)
+        if not urls:
+            logger.warning("JPX のページに銘柄一覧ファイルへのリンクが見つかりませんでした")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("JPX のページを取得できませんでした: %s", exc)
+    return urls + [u for u in JPX_LIST_URLS if u not in urls]
+
+
+def download_jpx_list(path: Path = JPX_CACHE_PATH, session=None) -> list[SearchResult]:
     """JPX から最新の銘柄一覧をダウンロードしてキャッシュに保存する(失敗時は例外)。"""
     import pandas as pd
     import requests
 
-    response = requests.get(
-        JPX_LIST_URL, timeout=60, headers={"User-Agent": "Mozilla/5.0 (StockAlert)"}
-    )
-    response.raise_for_status()
-    df = pd.read_excel(io.BytesIO(response.content), engine="xlrd")
-    listing = parse_jpx_dataframe(df)
-    if not listing:
-        raise ValueError("銘柄一覧に株式が1件も含まれていませんでした")
-    save_jpx_cache(listing, path)
-    logger.info("東証の銘柄一覧を更新しました(%d 銘柄)", len(listing))
-    return listing
+    session = session or requests.Session()
+    errors = []
+    for url in _candidate_urls(session):
+        try:
+            response = session.get(url, timeout=60, headers=HTTP_HEADERS)
+            response.raise_for_status()
+            # xls / xlsx はファイルの中身から自動判別する
+            df = pd.read_excel(io.BytesIO(response.content))
+            listing = parse_jpx_dataframe(df)
+            if not listing:
+                raise ValueError("銘柄一覧に株式が1件も含まれていませんでした")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("銘柄一覧を取得できませんでした(%s): %s", url, exc)
+            errors.append(f"{url.rsplit('/', 1)[-1]}: {exc}")
+            continue
+        save_jpx_cache(listing, path)
+        logger.info("東証の銘柄一覧を更新しました(%d 銘柄)", len(listing))
+        return listing
+    raise RuntimeError("東証の銘柄一覧をダウンロードできませんでした(" + " / ".join(errors) + ")")
 
 
 def search_japan(query: str, listing: list[SearchResult]) -> list[SearchResult]:

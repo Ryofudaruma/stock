@@ -34,7 +34,7 @@
 | 言語 | Python 3.11 以上 | |
 | GUI | `tkinter` / `ttk` | Python 標準。追加インストール不要 |
 | 株価取得 | `yfinance` | 無料・APIキー不要。`prices.get_current_price(symbol) -> float \| None` に隔離 |
-| 日本株の銘柄検索 | JPX「東証上場銘柄一覧」(`data_j.xls`) + `xlrd` | ダウンロードして CSV にキャッシュ。30日ごとに自動更新 |
+| 日本株の銘柄検索 | JPX「東証上場銘柄一覧」(`data_j.xlsx`。旧形式 `data_j.xls` にも対応) + `openpyxl` / `xlrd` | 一覧ページからファイルのリンクを探してダウンロードし、CSV にキャッシュ。30日ごとに自動更新 |
 | 米国株の銘柄検索 | `yfinance.Search` | NYSE / NASDAQ の株式のみ表示 |
 | メール通知 | SMTP(標準ライブラリ `smtplib`) | 587: STARTTLS / 465: SSL。Gmail + アプリパスワードを想定 |
 | パスワード保存 | `keyring`(Windows 資格情報マネージャー) | 設定ファイルには保存しない |

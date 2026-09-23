@@ -1,5 +1,6 @@
 """銘柄検索のテスト(ネットワークには接続しない)。"""
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -65,16 +66,103 @@ class JpxTest(unittest.TestCase):
             self.assertEqual(search.load_jpx_cache(path), self.listing)
             self.assertLess(search.jpx_cache_age_days(path), 1)
 
-    def test_download_parses_and_caches(self):
-        response = mock.Mock(content=b"xls-bytes")
-        with tempfile.TemporaryDirectory() as d, \
-                mock.patch("requests.get", return_value=response) as get, \
-                mock.patch("pandas.read_excel", return_value=jpx_df()):
-            path = Path(d) / "jpx.csv"
-            listing = search.download_jpx_list(path)
-            self.assertEqual(len(listing), 5)
-            self.assertEqual(search.load_jpx_cache(path), listing)
-            self.assertEqual(get.call_args.args[0], search.JPX_LIST_URL)
+    def test_parse_tolerates_column_name_variations(self):
+        df = jpx_df().rename(columns={"コード": " コード ", "市場・商品区分": "市場・商品区分(注)"})
+        df["33業種コード"] = 50
+        self.assertEqual(len(search.parse_jpx_dataframe(df)), 5)
+
+
+def xlsx_bytes(df) -> bytes:
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False, engine="openpyxl")
+    return buf.getvalue()
+
+
+class FakeResponse:
+    def __init__(self, status=200, content=b"", text=""):
+        self.status_code = status
+        self.content = content
+        self.text = text
+        self.apparent_encoding = "utf-8"
+        self.encoding = None
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise OSError(f"{self.status_code} Client Error")
+
+
+class FakeSession:
+    def __init__(self, routes):
+        self.routes = routes
+        self.requested = []
+
+    def get(self, url, **kwargs):
+        self.requested.append(url)
+        route = self.routes.get(url, FakeResponse(404))
+        if isinstance(route, Exception):
+            raise route
+        return route
+
+
+PAGE_HTML = """<html><body>
+<a href="/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx">東証上場銘柄一覧（2026年8月末）</a>
+<a href="/other/file.pdf">PDF</a>
+</body></html>"""
+
+
+class JpxDownloadTest(unittest.TestCase):
+    NEW_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "jpx.csv"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_find_links_in_page(self):
+        html = PAGE_HTML + '<a href="https://example.jp/x/data_j.xls">old</a>'
+        self.assertEqual(search.find_jpx_file_urls(html), [self.NEW_URL, "https://example.jp/x/data_j.xls"])
+        self.assertEqual(search.find_jpx_file_urls("<html></html>"), [])
+
+    def test_download_xlsx_found_on_page(self):
+        session = FakeSession({
+            search.JPX_PAGE_URL: FakeResponse(text=PAGE_HTML),
+            self.NEW_URL: FakeResponse(content=xlsx_bytes(jpx_df())),
+        })
+        listing = search.download_jpx_list(self.path, session=session)
+        self.assertEqual([r.symbol for r in listing], ["7203.T", "7201.T", "6758.T", "130A.T", "9999.T"])
+        self.assertEqual(search.load_jpx_cache(self.path), listing)
+        self.assertEqual(session.requested, [search.JPX_PAGE_URL, self.NEW_URL])
+
+    def test_falls_back_to_known_urls_when_page_fails(self):
+        session = FakeSession({
+            search.JPX_PAGE_URL: OSError("page down"),
+            search.JPX_LIST_URLS[0]: FakeResponse(404),
+            search.JPX_LIST_URLS[1]: FakeResponse(content=xlsx_bytes(jpx_df())),
+        })
+        with self.assertLogs("stock_alert.search", level="INFO"):
+            listing = search.download_jpx_list(self.path, session=session)
+        self.assertEqual(len(listing), 5)
+        self.assertEqual(session.requested, [search.JPX_PAGE_URL, *search.JPX_LIST_URLS])
+
+    def test_all_candidates_fail(self):
+        session = FakeSession({search.JPX_PAGE_URL: FakeResponse(text="<html></html>")})
+        with self.assertLogs("stock_alert.search", level="INFO"):
+            with self.assertRaises(RuntimeError) as ctx:
+                search.download_jpx_list(self.path, session=session)
+        self.assertIn("404", str(ctx.exception))
+        self.assertFalse(self.path.exists())
+
+    def test_broken_file_is_skipped(self):
+        session = FakeSession({
+            search.JPX_PAGE_URL: FakeResponse(text=PAGE_HTML),
+            self.NEW_URL: FakeResponse(content=b"<html>not excel</html>"),
+            search.JPX_LIST_URLS[1]: FakeResponse(content=xlsx_bytes(jpx_df())),
+        })
+        with self.assertLogs("stock_alert.search", level="INFO"):
+            listing = search.download_jpx_list(self.path, session=session)
+        self.assertEqual(len(listing), 5)
 
 
 class YahooTest(unittest.TestCase):

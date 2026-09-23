@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import socket
+import ssl
+import unicodedata
 from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formatdate
@@ -21,6 +24,37 @@ KEYRING_SERVICE = APP_ID
 
 class PasswordStoreError(Exception):
     """パスワードの保存・読み出しに失敗した。"""
+
+
+def normalize_password(password: str | None) -> str:
+    """貼り付け時に紛れ込む空白(全角スペース・改行・ノーブレークスペースなど)を取り除く。
+
+    Google のアプリパスワードは「abcd efgh ijkl mnop」のように空白入りで表示されるが、空白は不要。
+    """
+    if not password:
+        return ""
+    text = unicodedata.normalize("NFKC", password)
+    return "".join(ch for ch in text if not ch.isspace())
+
+
+def _describe_error(exc: Exception, host: str, port: int, stage: str) -> str:
+    """送信エラーを、原因の見当がつく日本語の説明にする。"""
+    where = f"{host}:{port} への{stage}"
+    gmail_hint = "Gmail の場合は SMTPサーバー smtp.gmail.com・ポート 587・送信元は Gmail アドレス、の組み合わせか確認してください。"
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return (f"メールサーバーへのログインに失敗しました({where})。"
+                f"送信元メールアドレスとアプリパスワードを確認してください。{gmail_hint} 詳細: {exc}")
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return (f"メールサーバーとの接続が途中で切れました({where})。{gmail_hint}"
+                "ウイルス対策ソフトの「メール保護」機能が通信を止めていることもあります。"
+                "ログイン失敗が続いた直後は、しばらく(数十分)待ってから再度お試しください。 詳細: {exc}".format(exc=exc))
+    if isinstance(exc, ssl.SSLError):
+        return (f"暗号化通信に失敗しました({where})。ポート番号(587 / 465)が正しいか、"
+                f"ウイルス対策ソフトが通信を検査していないか確認してください。 詳細: {exc}")
+    if isinstance(exc, (socket.gaierror, ConnectionRefusedError, TimeoutError, socket.timeout)):
+        return (f"メールサーバーに接続できませんでした({where})。SMTPサーバー名・ポート番号と"
+                f"インターネット接続を確認してください。 詳細: {exc!r}")
+    return f"メールの送信に失敗しました({where})。 詳細: {exc!r}"
 
 
 def get_password(user: str) -> str | None:
@@ -72,6 +106,7 @@ def send_email(
     host = str(email_cfg.get("smtp_host") or "").strip()
     if password is None:
         password = get_password(from_addr)
+    password = normalize_password(password)
 
     missing = missing_fields(email_cfg, password)
     if missing:
@@ -90,19 +125,21 @@ def send_email(
     msg["To"] = to_addr
     msg["Date"] = formatdate(localtime=True)
 
+    # どの段階で失敗したかをログに残し、原因を特定しやすくする
+    stage = "接続"
     try:
         # 465 は最初から暗号化(SSL)、それ以外(587 など)は STARTTLS で暗号化する
         smtp_class = smtplib.SMTP_SSL if port == 465 else smtplib.SMTP
         with smtp_class(host, port, timeout=30) as smtp:
             if port != 465:
+                stage = "暗号化(STARTTLS)"
                 smtp.starttls()
+            stage = "ログイン"
             smtp.login(from_addr, password)
+            stage = "送信"
             smtp.sendmail(from_addr, [to_addr], msg.as_string())
-    except smtplib.SMTPAuthenticationError as exc:
-        logger.error("メールサーバーへのログインに失敗しました。アドレスとアプリパスワードを確認してください: %s", exc)
-        return False
     except Exception as exc:  # noqa: BLE001 - 通知失敗でアプリを落とさない
-        logger.error("メールの送信に失敗しました: %s", exc)
+        logger.error(_describe_error(exc, host, port, stage))
         return False
 
     logger.info("メールを送信しました(宛先: %s)", to_addr)

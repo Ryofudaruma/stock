@@ -56,10 +56,28 @@ class SendEmailTest(unittest.TestCase):
                 self.assertFalse(mailer.send_email("本文", CFG, password="wrong"))
         self.assertIn("アプリパスワード", logs.output[0])
 
+    def test_disconnect_reports_server_and_stage(self):
+        with mock.patch.object(mailer.smtplib, "SMTP") as cls:
+            cls.return_value.__enter__.return_value.starttls.side_effect = \
+                smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+            with self.assertLogs("stock_alert.mailer", level="ERROR") as logs:
+                self.assertFalse(mailer.send_email("本文", CFG, password="pw"))
+        self.assertIn("smtp.gmail.com:587 への暗号化(STARTTLS)", logs.output[0])
+        self.assertIn("接続が途中で切れました", logs.output[0])
+
+    def test_password_whitespace_removed(self):
+        self.assertEqual(mailer.normalize_password(" abcd efgh\u00a0ijkl\u3000mnop\n"), "abcdefghijklmnop")
+        self.assertEqual(mailer.normalize_password("ＡＢＣＤ"), "ABCD")
+        self.assertEqual(mailer.normalize_password(None), "")
+        with mock.patch.object(mailer.smtplib, "SMTP") as cls:
+            mailer.send_email("本文", CFG, password="abcd efgh ijkl mnop")
+        cls.return_value.__enter__.return_value.login.assert_called_once_with("me@example.com", "abcdefghijklmnop")
+
     def test_network_error(self):
         with mock.patch.object(mailer.smtplib, "SMTP", side_effect=OSError("refused")):
-            with self.assertLogs("stock_alert.mailer", level="ERROR"):
+            with self.assertLogs("stock_alert.mailer", level="ERROR") as logs:
                 self.assertFalse(mailer.send_email("本文", CFG, password="pw"))
+        self.assertIn("smtp.gmail.com:587 への接続", logs.output[0])
 
     def test_bad_port(self):
         with self.assertLogs("stock_alert.mailer", level="ERROR"):
