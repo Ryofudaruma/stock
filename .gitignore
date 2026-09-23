@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 個人の設定・状態・ログ(銘柄やメールアドレスを含むためコミットしない)
+data/
+
+# 認証情報(絶対にコミットしない)
+.env
+.env.*
+*.secret
