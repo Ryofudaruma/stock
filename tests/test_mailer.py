@@ -65,6 +65,22 @@ class SendEmailTest(unittest.TestCase):
         self.assertIn("smtp.gmail.com:587 への暗号化(STARTTLS)", logs.output[0])
         self.assertIn("接続が途中で切れました", logs.output[0])
 
+    def test_google_blocked_login_534(self):
+        with mock.patch.object(mailer.smtplib, "SMTP") as cls:
+            cls.return_value.__enter__.return_value.login.side_effect = smtplib.SMTPAuthenticationError(
+                534, b"5.7.9 Please log in with your web browser and then try again.")
+            with self.assertLogs("stock_alert.mailer", level="ERROR") as logs:
+                self.assertFalse(mailer.send_email("本文", CFG, password="pw"))
+        self.assertIn("Google がこのログインをブロックしました", logs.output[0])
+
+    def test_disconnect_during_login(self):
+        with mock.patch.object(mailer.smtplib, "SMTP") as cls:
+            cls.return_value.__enter__.return_value.login.side_effect = \
+                smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+            with self.assertLogs("stock_alert.mailer", level="ERROR") as logs:
+                self.assertFalse(mailer.send_email("本文", CFG, password="pw"))
+        self.assertIn("待ってから再度", logs.output[0])
+
     def test_password_whitespace_removed(self):
         self.assertEqual(mailer.normalize_password(" abcd efgh\u00a0ijkl\u3000mnop\n"), "abcdefghijklmnop")
         self.assertEqual(mailer.normalize_password("ＡＢＣＤ"), "ABCD")

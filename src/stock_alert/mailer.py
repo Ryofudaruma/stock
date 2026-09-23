@@ -41,9 +41,20 @@ def _describe_error(exc: Exception, host: str, port: int, stage: str) -> str:
     """送信エラーを、原因の見当がつく日本語の説明にする。"""
     where = f"{host}:{port} への{stage}"
     gmail_hint = "Gmail の場合は SMTPサーバー smtp.gmail.com・ポート 587・送信元は Gmail アドレス、の組み合わせか確認してください。"
+    if isinstance(exc, smtplib.SMTPAuthenticationError) and exc.smtp_code == 534:
+        # Google が「普段と違うログイン」や通常のパスワードでのログインをブロックした場合
+        return (f"Google がこのログインをブロックしました({where})。"
+                "①「アプリパスワード」欄に、普段の Google パスワードではなく、2段階認証を有効にしたうえで"
+                "発行した16文字のアプリパスワードを入れているか確認してください。"
+                "② このPCのブラウザで送信元の Gmail にログインし、Google から「セキュリティ通知」が届いていれば"
+                "「自分のアクティビティ」と確認してください。 詳細: {exc}".format(exc=exc))
     if isinstance(exc, smtplib.SMTPAuthenticationError):
         return (f"メールサーバーへのログインに失敗しました({where})。"
                 f"送信元メールアドレスとアプリパスワードを確認してください。{gmail_hint} 詳細: {exc}")
+    if isinstance(exc, smtplib.SMTPServerDisconnected) and stage == "ログイン":
+        return (f"ログイン中にメールサーバーから接続を切られました({where})。"
+                "ログインの失敗が続いたため、Google が一時的に接続を拒否している可能性が高いです。"
+                "アドレスとアプリパスワードを確認したうえで、30分〜1時間ほど待ってから再度お試しください。 詳細: {exc}".format(exc=exc))
     if isinstance(exc, smtplib.SMTPServerDisconnected):
         return (f"メールサーバーとの接続が途中で切れました({where})。{gmail_hint}"
                 "ウイルス対策ソフトの「メール保護」機能が通信を止めていることもあります。"
